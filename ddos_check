@@ -1,0 +1,24 @@
+#!/usr/bin/bash
+
+
+active_connections=`netstat -n | grep :80 | wc -l`
+
+
+syn_active=`netstat -n | grep :80 | grep SYN | wc -l`
+
+if [ "$active_connections" -gt 500 ] || [ "$syn_active" -gt 100 ];then
+	echo "!!! ERROR !!! system is Under Attack"
+	printf "Enter ip address: "
+	read ip
+	if [ "$ip" ];then
+		iptables -A INPUT 1 -s $ip -j DROP
+		iptables-save > /etc/sysyconfig/iptables
+	else
+		sudo iptables -A INPUT -t filter -p tcp -m multiport --dport 80,443 -j DROP
+		iptables-save > /etc/sysconfig/iptables
+	fi
+	killall -KILL httpd
+
+fi
+
+
