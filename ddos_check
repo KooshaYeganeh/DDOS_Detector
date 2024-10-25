@@ -1,24 +1,82 @@
 #!/usr/bin/bash
 
+# Enterprise-Level DDoS Detection and Mitigation Script
 
-active_connections=`netstat -n | grep :80 | wc -l`
+# Set thresholds
+ACTIVE_CONN_THRESHOLD=1000  # Active connections threshold
+SYN_ACTIVE_THRESHOLD=200    # SYN packets threshold
+LOG_FILE="/var/log/ddos_protection.log"
 
+# Email alerts
+ALERT_EMAIL="admin@enterprise.com"
+SEND_ALERTS=true  # Set to false to disable email alerts
 
-syn_active=`netstat -n | grep :80 | grep SYN | wc -l`
+# Whitelist file path
+WHITELIST_FILE="/path/to/whitelist.txt"
 
-if [ "$active_connections" -gt 500 ] || [ "$syn_active" -gt 100 ];then
-	echo "!!! ERROR !!! system is Under Attack"
-	printf "Enter ip address: "
-	read ip
-	if [ "$ip" ];then
-		iptables -A INPUT 1 -s $ip -j DROP
-		iptables-save > /etc/sysyconfig/iptables
-	else
-		sudo iptables -A INPUT -t filter -p tcp -m multiport --dport 80,443 -j DROP
-		iptables-save > /etc/sysconfig/iptables
-	fi
-	killall -KILL httpd
+# Get current active connections and SYN packets
+active_connections=$(netstat -n | grep :80 | wc -l)
+syn_active=$(netstat -n | grep :80 | grep SYN | wc -l)
 
+# Helper function to send email alerts
+send_alert() {
+    if [ "$SEND_ALERTS" = true ]; then
+        SUBJECT="DDoS Alert: High traffic detected on $(hostname)"
+        MESSAGE="DDoS detected on $(hostname):\n\nActive Connections: $active_connections\nSYN Packets: $syn_active\nBlocked IPs: $1\n"
+        echo -e "$MESSAGE" | mail -s "$SUBJECT" "$ALERT_EMAIL"
+    fi
+}
+
+# Log DDoS detection events
+log_ddos_event() {
+    echo "$(date): DDoS detected - Active Connections: $active_connections, SYN Packets: $syn_active" >> "$LOG_FILE"
+}
+
+# Check if IP is whitelisted by reading from the file
+is_whitelisted() {
+    grep -qx "$1" "$WHITELIST_FILE" && return 0 || return 1
+}
+
+# Detect potential DDoS attack
+if [ "$active_connections" -gt "$ACTIVE_CONN_THRESHOLD" ] || [ "$syn_active" -gt "$SYN_ACTIVE_THRESHOLD" ]; then
+    echo "!!! ALERT !!! Possible DDoS Attack Detected"
+    echo "Active connections: $active_connections, SYN packets: $syn_active"
+
+    # Log the DDoS event
+    log_ddos_event
+
+    # Blocking offending IP addresses
+    echo "Identifying and blocking IP addresses..."
+    blocked_ips=()
+    for ip in $(netstat -n | awk '/:80/ {print $5}' | cut -d: -f1 | sort | uniq -c | sort -nr | head -n 20 | awk '{print $2}'); do
+        if is_whitelisted "$ip"; then
+            echo "Skipping whitelisted IP: $ip"
+        else
+            echo "Blocking IP: $ip"
+            iptables -A INPUT -s "$ip" -j DROP
+            blocked_ips+=("$ip")
+        fi
+    done
+
+    # Save iptables rules
+    iptables-save > /etc/sysconfig/iptables
+    echo "Iptables rules saved."
+
+    # Kill HTTPD processes to mitigate the load
+    echo "Stopping HTTPD service..."
+    systemctl stop httpd || killall -KILL httpd
+
+    # Send an email alert
+    if [ "${#blocked_ips[@]}" -gt 0 ]; then
+        send_alert "${blocked_ips[*]}"
+    fi
+
+else
+    echo "No DDoS attack detected."
 fi
 
+# Uncomment the following block if you want the HTTPD service to restart automatically
+sleep 300  # Wait for 5 minutes
+echo "Restarting HTTPD service..."
+systemctl start httpd
 
